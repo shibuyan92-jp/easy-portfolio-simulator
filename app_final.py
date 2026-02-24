@@ -37,8 +37,32 @@ tickers_input = st.sidebar.text_area(
     help="例: 8802.T, 7203.T"
 )
 
-start_date = st.sidebar.date_input("開始日", pd.to_datetime("2020-01-01"))
-end_date = st.sidebar.date_input("終了日", pd.to_datetime("2024-12-31"))
+from datetime import date  # ← ファイル冒頭のimport群に追加してもOK
+
+# 初期値（必要ならここを調整）
+DEFAULT_START = pd.to_datetime("2020-01-01").date()
+DEFAULT_END = pd.to_datetime("2024-12-31").date()
+
+# session_state 初期化（初回だけ）
+if "start_date" not in st.session_state:
+    st.session_state["start_date"] = DEFAULT_START
+if "end_date" not in st.session_state:
+    st.session_state["end_date"] = DEFAULT_END
+
+# 日付入力（keyでsession_stateと紐づけ）
+start_date = st.sidebar.date_input("開始日", value=st.session_state["start_date"], key="start_date")
+
+# 終了日＋「今日」ボタンを横並びにする
+c_end, c_today = st.sidebar.columns([3, 1])
+
+with c_end:
+    end_date = st.date_input("終了日", value=st.session_state["end_date"], key="end_date")
+
+with c_today:
+    st.write("")  # ラベル高さ調整（見た目用）
+    if st.button("今日"):
+        st.session_state["end_date"] = date.today()
+        st.rerun()
 
 st.sidebar.subheader("自分のルール")
 min_weight = st.sidebar.slider(
