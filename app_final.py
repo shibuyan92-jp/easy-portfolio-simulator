@@ -1,20 +1,23 @@
+import re
+from datetime import date
+
 import streamlit as st
 import yfinance as yf
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import scipy.optimize as sco
-from datetime import date
+
 
 # -----------------------------
 # ページ設定・タイトル
 # -----------------------------
-st.set_page_config(page_title="かんたん株式分散シミュレーター", layout="wide")
-st.title("🔰 かんたん株式分散シミュレーター")
-st.markdown("専門知識がなくても使える、**過去データに基づく資産配分シミュレーター**です。")
+st.set_page_config(page_title="かんたん株式分散シミュレーター（比較）", layout="wide")
+st.title("🔰 かんたん株式分散シミュレーター（比較）")
+st.markdown("投資判断そのものではなく、**複数案を同じ物差しで比べる**ための過去データ・シミュレーターです。")
 
 # -----------------------------
-# 免責（社外公開向け：常時表示 + 詳細）
+# 免責（社外公開向け）
 # -----------------------------
 with st.expander("⚠️ ご利用にあたっての重要な注意（必ずお読みください）"):
     st.markdown("""
@@ -25,60 +28,87 @@ with st.expander("⚠️ ご利用にあたっての重要な注意（必ずお�
 """)
 
 # -----------------------------
-# サイドバー設定
+# 便利関数：ティッカー & 比率パース
 # -----------------------------
-st.sidebar.header("🛠️ 設定パネル")
-st.sidebar.info("💡 ヒント: マウスを項目の上に乗せると、詳しい説明が表示されます。")
+SEP_PATTERN = r"[,\s、，;；\n\r\t]+"
 
-default_tickers = "8802.T, 7203.T, 6758.T, 8306.T, 9984.T"
-tickers_input = st.sidebar.text_area(
-    "銘柄コード (カンマ区切り)",
-    value=default_tickers,
-    height=80,
-    help="例: 8802.T, 7203.T"
-)
+def parse_tickers(text: str):
+    """カンマ/スペース/改行/全角カンマ/読点などを許容し、数字だけは .T を補完"""
+    if not text:
+        return []
+    raw = re.split(SEP_PATTERN, text.strip())
+    ts = []
+    for t in raw:
+        t = t.strip()
+        if not t:
+            continue
+        # 全角英数の混在があっても最低限吸収（簡易）
+        t = t.replace("　", "")  # 全角スペース除去
+        t = t.upper()
+        # 数字だけなら日本株想定で .T 補完
+        if t.isdigit():
+            t = f"{t}.T"
+        ts.append(t)
+    # 重複除去（順序保持）
+    seen = set()
+    out = []
+    for t in ts:
+        if t not in seen:
+            out.append(t)
+            seen.add(t)
+    return out
+
+def parse_weights(text: str, n: int):
+    """
+    比率入力（例: 20, 30, 50 / 20% 30% 50% / 改行区切り）をfloat配列に。
+    空なら None を返す（=均等配分にする）
+    """
+    if text is None:
+        return None
+    s = str(text).strip()
+    if s == "":
+        return None
+
+    parts = re.split(SEP_PATTERN, s)
+    vals = []
+    for p in parts:
+        p = p.strip().replace("%", "")
+        if p == "":
+            continue
+        try:
+            vals.append(float(p))
+        except:
+            return "PARSE_ERROR"
+
+    if len(vals) != n:
+        return "LEN_MISMATCH"
+
+    w = np.array(vals, dtype=float)
+    if np.any(w < 0):
+        return "NEGATIVE"
+    # 100基準入力を想定（合計が100に近くない場合は正規化）
+    ssum = w.sum()
+    if ssum == 0:
+        return "ZERO"
+    w = w / ssum
+    return w
+
+def portfolio_metrics(mean, cov, w, risk_free):
+    """年率の期待リターン、リスク（標準偏差）、Sharpeを返す"""
+    ret = float(np.sum(mean * w) * 252)
+    std = float(np.sqrt(np.dot(w.T, np.dot(cov, w))) * np.sqrt(252))
+    sharpe = (ret - risk_free) / std if std != 0 else np.nan
+    return ret, std, sharpe
+
+def shorten(text: str, max_len: int = 22) -> str:
+    if text is None:
+        return ""
+    text = str(text)
+    return text if len(text) <= max_len else text[:max_len - 1] + "…"
+
 
 # -----------------------------
-# 日付入力（終了日：今日ボタン付き）
-# -----------------------------
-st.session_state.setdefault("start_date", pd.to_datetime("2020-01-01").date())
-st.session_state.setdefault("end_date", pd.to_datetime("2024-12-31").date())
-
-def set_end_today():
-    st.session_state["end_date"] = date.today()
-
-start_date = st.sidebar.date_input("開始日", key="start_date")
-
-col_end, col_today = st.sidebar.columns([3, 1])
-with col_end:
-    end_date = st.date_input("終了日", key="end_date")
-with col_today:
-    st.write("")
-    st.button("今日", on_click=set_end_today)
-
-st.sidebar.subheader("自分のルール")
-min_weight = st.sidebar.slider(
-    "最低これくらいは持ちたい (%)",
-    0, 20, 5, 1,
-    help="分散効果を高めるため5%程度がおすすめ"
-) / 100.0
-
-max_weight = st.sidebar.slider(
-    "最大ここまでにしておく (%)",
-    20, 100, 40, 5,
-    help="1銘柄への集中を防ぐ上限"
-) / 100.0
-
-risk_free_rate = st.sidebar.number_input(
-    "安全資産の利回り (%)",
-    value=1.0,
-    step=0.1,
-    help="国債などの金利"
-) / 100.0
-
-
-# -----------------------------
-# 関数群
+# データ取得系
 # -----------------------------
 @st.cache_data(show_spinner=False)
 def get_data(tickers, start, end):
@@ -87,14 +117,12 @@ def get_data(tickers, start, end):
         if df is None or df.empty:
             return None
 
-        # yfinanceは複数銘柄だとMultiIndexになりやすい
         if isinstance(df.columns, pd.MultiIndex):
             if "Adj Close" in df.columns.get_level_values(0):
                 return df.xs("Adj Close", axis=1, level=0)
             if "Close" in df.columns.get_level_values(0):
                 return df.xs("Close", axis=1, level=0)
 
-        # 単一銘柄の場合
         if "Adj Close" in df.columns:
             return df["Adj Close"]
         if "Close" in df.columns:
@@ -104,176 +132,4 @@ def get_data(tickers, start, end):
     except Exception:
         return None
 
-
 @st.cache_data(show_spinner=False)
-def get_company_names(tickers_list):
-    names = {}
-    for t in tickers_list:
-        try:
-            info = yf.Ticker(t).info or {}
-            names[t] = info.get("shortName", info.get("longName", t))
-        except Exception:
-            names[t] = t
-    return names
-
-
-def shorten(text: str, max_len: int = 22) -> str:
-    """円グラフのラベルが潰れないように短縮"""
-    if text is None:
-        return ""
-    text = str(text)
-    return text if len(text) <= max_len else text[:max_len - 1] + "…"
-
-
-# -----------------------------
-# メイン処理
-# -----------------------------
-if st.button("📊 シミュレーション実行（過去データ）"):
-    ts = [t.strip() for t in tickers_input.split(",") if t.strip()]
-
-    if len(ts) < 2:
-        st.error("⚠️ 2銘柄以上入れてください")
-    elif start_date >= end_date:
-        st.error("⚠️ 日付の範囲が不正です（開始日 < 終了日）")
-    elif min_weight > max_weight:
-        st.error("⚠️ 最小比率が最大比率を上回っています")
-    else:
-        # yfinanceに渡す型を堅くする（date -> Timestamp）
-        start_ts = pd.to_datetime(start_date)
-        end_ts = pd.to_datetime(end_date)
-
-        with st.spinner("データを分析中..."):
-            df = get_data(ts, start_ts, end_ts)
-            name_map = get_company_names(ts)
-
-        if df is None or df.empty:
-            st.error("❌ データ取得失敗（銘柄コード・日付範囲を見直してください）")
-        else:
-            df = df.dropna().select_dtypes(include=[np.number])
-            if df.shape[1] < 2:
-                st.error("⚠️ 有効なデータ不足（銘柄や期間を変えてください）")
-            else:
-                try:
-                    log_ret = np.log(df / df.shift(1)).dropna()
-                    mean = log_ret.mean()
-                    cov = log_ret.cov()
-                    n = len(df.columns)
-
-                    def neg_sharpe(w):
-                        r = np.sum(mean * w) * 252
-                        s = np.sqrt(np.dot(w.T, np.dot(cov, w))) * np.sqrt(252)
-                        if s == 0:
-                            return 1e9
-                        return -((r - risk_free_rate) / s)
-
-                    cons = ({"type": "eq", "fun": lambda x: np.sum(x) - 1.0},)
-                    bnds = tuple((min_weight, max_weight) for _ in range(n))
-
-                    res = sco.minimize(
-                        neg_sharpe,
-                        x0=np.array([1.0 / n] * n),
-                        method="SLSQP",
-                        bounds=bnds,
-                        constraints=cons
-                    )
-
-                    if not res.success:
-                        st.warning("⚠️ 最適化に失敗しました。条件（最小/最大比率）を緩めてください。")
-                    else:
-                        # -----------------------------
-                        # 結果
-                        # -----------------------------
-                        w = res.x
-                        ret = np.sum(mean * w) * 252
-                        std = np.sqrt(np.dot(w.T, np.dot(cov, w))) * np.sqrt(252)
-                        sharpe = (ret - risk_free_rate) / std if std != 0 else np.nan
-
-                        st.success("✅ 計算完了！")
-
-                        # タブ（概要/配分/詳細）
-                        # Note: st.tabs は「全タブの内容が計算される」仕様があるため、
-                        # 重い計算はタブ生成前に一回だけ行うのが安全。[1](https://docs.streamlit.io/develop/api-reference/layout/st.tabs)
-                        tab1, tab2, tab3 = st.tabs(["📌 概要", "🥧 配分", "🧾 詳細"])
-
-                        # ---- タブ1：概要（KPI＋コメント）
-                        with tab1:
-                            c1, c2, c3 = st.columns(3)
-                            c1.metric("💰 期待リターン（年率）", f"{ret:.2%}")
-                            c2.metric("🛡️ リスク（年率）", f"{std:.2%}")
-                            c3.metric("📊 投資効率（Sharpe）", f"{sharpe:.2f}" if np.isfinite(sharpe) else "—")
-
-                            # 表現は控えめに（社外公開向け）
-                            if np.isfinite(sharpe):
-                                if sharpe >= 1.0:
-                                    st.info("参考：過去データ上では効率が高めの構成です。")
-                                elif sharpe >= 0.7:
-                                    st.success("参考：過去データ上ではバランスが良い構成です。")
-                                else:
-                                    st.warning("参考：過去データ上では効率が低めの可能性があります。")
-
-                        # ---- タブ2：配分（円グラフ＋バー付きテーブル）
-                        with tab2:
-                            valid_tickers = df.columns
-
-                            # ラベルは潰れがちなので短縮
-                            labels = [
-                                f"{shorten(name_map.get(t, t))}\n({t})"
-                                for t in valid_tickers
-                            ]
-
-                            left, right = st.columns([1, 1])
-
-                            with left:
-                                fig, ax = plt.subplots()
-                                ax.pie(w, labels=labels, autopct="%1.1f%%", startangle=90)
-                                ax.axis("equal")
-                                st.pyplot(fig)
-
-                            with right:
-                                # ProgressColumnは「数値」を使うので、比率を % の数値にして表示
-                                df_res = pd.DataFrame({
-                                    "コード": valid_tickers,
-                                    "社名": [name_map.get(t, t) for t in valid_tickers],
-                                    "推奨比率(%)": (w * 100.0)
-                                })
-
-                                # ProgressColumn: st.dataframe の column_config で指定 [2](https://docs.streamlit.io/develop/api-reference/data/st.column_config/st.column_config.progresscolumn)[3](https://streamlit.ghost.io/introducing-column-config/)
-                                st.dataframe(
-                                    df_res,
-                                    use_container_width=True,
-                                    hide_index=True,
-                                    column_config={
-                                        "推奨比率(%)": st.column_config.ProgressColumn(
-                                            "推奨比率(%)",
-                                            min_value=0.0,
-                                            max_value=100.0,
-                                            format="%.1f%%",
-                                            help="推奨比率を視覚的に比較できます。"
-                                        )
-                                    }
-                                )
-
-                        # ---- タブ3：詳細（前提・制約・メモ）
-                        with tab3:
-                            st.write("**前提（入力条件）**")
-                            st.write(f"- 期間：{start_date} 〜 {end_date}")
-                            st.write(f"- 銘柄数：{len(ts)}（有効データ：{len(df.columns)}）")
-                            st.write(f"- 制約：各銘柄 {min_weight:.0%} 〜 {max_weight:.0%}")
-                            st.write(f"- 安全資産の利回り：{risk_free_rate:.2%}")
-                            st.write("")
-                            st.write("**計算のメモ**")
-                            st.write("- 対数リターンから年率換算（252営業日換算）で算出しています。")
-                            st.write("- 結果は過去データに基づくもので、将来を保証しません。")
-
-                except Exception as e:
-                    st.error(f"エラー: {e}")
-
-# -----------------------------
-# 免責（短文：フッター常時表示）
-# -----------------------------
-st.markdown("---")
-st.caption(
-    "⚠️ 本アプリは投資助言を目的としたものではありません。"
-    "表示される結果は将来の成果を保証するものではなく、"
-    "最終的な投資判断はご自身の責任で行ってください。"
-)
