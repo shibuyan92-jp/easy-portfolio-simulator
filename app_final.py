@@ -8,7 +8,7 @@ import scipy.optimize as sco
 
 st.set_page_config(page_title="かんたん株式分散シミュレーター", layout="wide")
 st.title("🔰 かんたん株式分散シミュレーター")
-st.markdown("専門知識がなくても大丈夫。AIが**「リスクを抑えて利益を狙う」**ための最適な配分を計算します。")
+st.markdown("専門知識がなくても使える。過去データに基づく資産配分シミュレーターです。")
 %%writefile -a app_final.py
 
 # --- サイドバー設定 ---
