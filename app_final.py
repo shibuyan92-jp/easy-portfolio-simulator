@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import scipy.optimize as sco
+from datetime import date
 
 # -----------------------------
 # ページ設定・タイトル
@@ -37,32 +38,25 @@ tickers_input = st.sidebar.text_area(
     help="例: 8802.T, 7203.T"
 )
 
-from datetime import date  # ← ファイル冒頭のimport群に追加してもOK
+# -----------------------------
+# 日付入力（終了日：今日ボタン付き）
+# Streamlitの仕様：key付きwidgetを描画した後に同じkeyのsession_stateを直接書き換えると例外になる
+# → on_clickコールバックで更新するのが安全（定石）[1](https://outlook.office365.com/owa/?ItemID=AAMkADcwNDQ2NzllLWRlNmEtNDVmNS05ZjkyLTBmMDVjNjhkOTRiZgBGAAAAAACXXXZLaS%2bsQZcKwnVSJtOmBwBZ3ojfmu7lR51e5bpgUtRZAAAAAAEMAABZ3ojfmu7lR51e5bpgUtRZAAGktVTCAAA%3d&exvsurl=1&viewmodel=ReadMessageItem)
+# -----------------------------
+st.session_state.setdefault("start_date", pd.to_datetime("2020-01-01").date())
+st.session_state.setdefault("end_date", pd.to_datetime("2024-12-31").date())
 
-# 初期値（必要ならここを調整）
-DEFAULT_START = pd.to_datetime("2020-01-01").date()
-DEFAULT_END = pd.to_datetime("2024-12-31").date()
+def set_end_today():
+    st.session_state["end_date"] = date.today()
 
-# session_state 初期化（初回だけ）
-if "start_date" not in st.session_state:
-    st.session_state["start_date"] = DEFAULT_START
-if "end_date" not in st.session_state:
-    st.session_state["end_date"] = DEFAULT_END
+start_date = st.sidebar.date_input("開始日", key="start_date")
 
-# 日付入力（keyでsession_stateと紐づけ）
-start_date = st.sidebar.date_input("開始日", value=st.session_state["start_date"], key="start_date")
-
-# 終了日＋「今日」ボタンを横並びにする
-c_end, c_today = st.sidebar.columns([3, 1])
-
-with c_end:
-    end_date = st.date_input("終了日", value=st.session_state["end_date"], key="end_date")
-
-with c_today:
-    st.write("")  # ラベル高さ調整（見た目用）
-    if st.button("今日"):
-        st.session_state["end_date"] = date.today()
-        st.rerun()
+col_end, col_today = st.sidebar.columns([3, 1])
+with col_end:
+    end_date = st.date_input("終了日", key="end_date")
+with col_today:
+    st.write("")
+    st.button("今日", on_click=set_end_today)
 
 st.sidebar.subheader("自分のルール")
 min_weight = st.sidebar.slider(
@@ -116,10 +110,8 @@ def get_company_names(tickers_list):
     names = {}
     for t in tickers_list:
         try:
-            ticker_info = yf.Ticker(t)
-            info = ticker_info.info or {}
-            name = info.get("shortName", info.get("longName", t))
-            names[t] = name
+            info = yf.Ticker(t).info or {}
+            names[t] = info.get("shortName", info.get("longName", t))
         except Exception:
             names[t] = t
     return names
@@ -127,9 +119,8 @@ def get_company_names(tickers_list):
 # -----------------------------
 # メイン処理
 # -----------------------------
-if st.button("🚀 AIに計算させる"):
-    raw_ts = tickers_input.split(",")
-    ts = [t.strip() for t in raw_ts if t.strip()]
+if st.button("📊 シミュレーション実行（過去データ）"):
+    ts = [t.strip() for t in tickers_input.split(",") if t.strip()]
 
     if len(ts) < 2:
         st.error("⚠️ 2銘柄以上入れてください")
@@ -138,8 +129,12 @@ if st.button("🚀 AIに計算させる"):
     elif min_weight > max_weight:
         st.error("⚠️ 最小比率が最大比率を上回っています")
     else:
+        # yfinanceに渡す型を堅くする（date -> Timestamp）
+        start_ts = pd.to_datetime(start_date)
+        end_ts = pd.to_datetime(end_date)
+
         with st.spinner("データを分析中..."):
-            df = get_data(ts, start_date, end_date)
+            df = get_data(ts, start_ts, end_ts)
             name_map = get_company_names(ts)
 
         if df is None or df.empty:
@@ -158,7 +153,6 @@ if st.button("🚀 AIに計算させる"):
                     def neg_sharpe(w):
                         r = np.sum(mean * w) * 252
                         s = np.sqrt(np.dot(w.T, np.dot(cov, w))) * np.sqrt(252)
-                        # 分散がゼロ等で割れない場合の保険
                         if s == 0:
                             return 1e9
                         return -((r - risk_free_rate) / s)
@@ -174,7 +168,9 @@ if st.button("🚀 AIに計算させる"):
                         constraints=cons
                     )
 
-                    if res.success:
+                    if not res.success:
+                        st.warning("⚠️ 最適化に失敗しました。条件（最小/最大比率）を緩めてください。")
+                    else:
                         w = res.x
                         ret = np.sum(mean * w) * 252
                         std = np.sqrt(np.dot(w.T, np.dot(cov, w))) * np.sqrt(252)
@@ -186,7 +182,7 @@ if st.button("🚀 AIに計算させる"):
                         c2.metric("🛡️ リスク（年率）", f"{std:.2%}")
                         c3.metric("📊 投資効率（Sharpe）", f"{sharpe:.2f}" if np.isfinite(sharpe) else "—")
 
-                        # 表現を少し控えめに（社外公開向け）
+                        # 表現は控えめに（社外公開向け）
                         if np.isfinite(sharpe):
                             if sharpe >= 1.0:
                                 st.info("参考：過去データ上では効率が高めの構成です。")
@@ -209,11 +205,9 @@ if st.button("🚀 AIに計算させる"):
                             df_res = pd.DataFrame({
                                 "コード": valid_tickers,
                                 "社名": [name_map.get(t, t) for t in valid_tickers],
-                                "推奨比率": [f"{v:.2%}" for v in w]
+                                "推奨比率": [f"{v:.2%}" for v in w],
                             })
                             st.dataframe(df_res, use_container_width=True)
-                    else:
-                        st.warning("⚠️ 最適化に失敗しました。条件（最小/最大比率）を緩めてください。")
 
                 except Exception as e:
                     st.error(f"エラー: {e}")
