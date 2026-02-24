@@ -40,8 +40,6 @@ tickers_input = st.sidebar.text_area(
 
 # -----------------------------
 # 日付入力（終了日：今日ボタン付き）
-# Streamlitの仕様：key付きwidgetを描画した後に同じkeyのsession_stateを直接書き換えると例外になる
-# → on_clickコールバックで更新するのが安全（定石）[1](https://outlook.office365.com/owa/?ItemID=AAMkADcwNDQ2NzllLWRlNmEtNDVmNS05ZjkyLTBmMDVjNjhkOTRiZgBGAAAAAACXXXZLaS%2bsQZcKwnVSJtOmBwBZ3ojfmu7lR51e5bpgUtRZAAAAAAEMAABZ3ojfmu7lR51e5bpgUtRZAAGktVTCAAA%3d&exvsurl=1&viewmodel=ReadMessageItem)
 # -----------------------------
 st.session_state.setdefault("start_date", pd.to_datetime("2020-01-01").date())
 st.session_state.setdefault("end_date", pd.to_datetime("2024-12-31").date())
@@ -78,6 +76,7 @@ risk_free_rate = st.sidebar.number_input(
     help="国債などの金利"
 ) / 100.0
 
+
 # -----------------------------
 # 関数群
 # -----------------------------
@@ -105,6 +104,7 @@ def get_data(tickers, start, end):
     except Exception:
         return None
 
+
 @st.cache_data(show_spinner=False)
 def get_company_names(tickers_list):
     names = {}
@@ -115,6 +115,15 @@ def get_company_names(tickers_list):
         except Exception:
             names[t] = t
     return names
+
+
+def shorten(text: str, max_len: int = 22) -> str:
+    """円グラフのラベルが潰れないように短縮"""
+    if text is None:
+        return ""
+    text = str(text)
+    return text if len(text) <= max_len else text[:max_len - 1] + "…"
+
 
 # -----------------------------
 # メイン処理
@@ -171,43 +180,90 @@ if st.button("📊 シミュレーション実行（過去データ）"):
                     if not res.success:
                         st.warning("⚠️ 最適化に失敗しました。条件（最小/最大比率）を緩めてください。")
                     else:
+                        # -----------------------------
+                        # 結果
+                        # -----------------------------
                         w = res.x
                         ret = np.sum(mean * w) * 252
                         std = np.sqrt(np.dot(w.T, np.dot(cov, w))) * np.sqrt(252)
                         sharpe = (ret - risk_free_rate) / std if std != 0 else np.nan
 
                         st.success("✅ 計算完了！")
-                        c1, c2, c3 = st.columns(3)
-                        c1.metric("💰 期待リターン（年率）", f"{ret:.2%}")
-                        c2.metric("🛡️ リスク（年率）", f"{std:.2%}")
-                        c3.metric("📊 投資効率（Sharpe）", f"{sharpe:.2f}" if np.isfinite(sharpe) else "—")
 
-                        # 表現は控えめに（社外公開向け）
-                        if np.isfinite(sharpe):
-                            if sharpe >= 1.0:
-                                st.info("参考：過去データ上では効率が高めの構成です。")
-                            elif sharpe >= 0.7:
-                                st.success("参考：過去データ上ではバランスが良い構成です。")
-                            else:
-                                st.warning("参考：過去データ上では効率が低めの可能性があります。")
+                        # タブ（概要/配分/詳細）
+                        # Note: st.tabs は「全タブの内容が計算される」仕様があるため、
+                        # 重い計算はタブ生成前に一回だけ行うのが安全。[1](https://docs.streamlit.io/develop/api-reference/layout/st.tabs)
+                        tab1, tab2, tab3 = st.tabs(["📌 概要", "🥧 配分", "🧾 詳細"])
 
-                        valid_tickers = df.columns
-                        labels = [f"{name_map.get(t, t)}\n({t})" for t in valid_tickers]
+                        # ---- タブ1：概要（KPI＋コメント）
+                        with tab1:
+                            c1, c2, c3 = st.columns(3)
+                            c1.metric("💰 期待リターン（年率）", f"{ret:.2%}")
+                            c2.metric("🛡️ リスク（年率）", f"{std:.2%}")
+                            c3.metric("📊 投資効率（Sharpe）", f"{sharpe:.2f}" if np.isfinite(sharpe) else "—")
 
-                        col1, col2 = st.columns([1, 1])
-                        with col1:
-                            fig, ax = plt.subplots()
-                            ax.pie(w, labels=labels, autopct="%1.1f%%", startangle=90)
-                            ax.axis("equal")
-                            st.pyplot(fig)
+                            # 表現は控えめに（社外公開向け）
+                            if np.isfinite(sharpe):
+                                if sharpe >= 1.0:
+                                    st.info("参考：過去データ上では効率が高めの構成です。")
+                                elif sharpe >= 0.7:
+                                    st.success("参考：過去データ上ではバランスが良い構成です。")
+                                else:
+                                    st.warning("参考：過去データ上では効率が低めの可能性があります。")
 
-                        with col2:
-                            df_res = pd.DataFrame({
-                                "コード": valid_tickers,
-                                "社名": [name_map.get(t, t) for t in valid_tickers],
-                                "推奨比率": [f"{v:.2%}" for v in w],
-                            })
-                            st.dataframe(df_res, use_container_width=True)
+                        # ---- タブ2：配分（円グラフ＋バー付きテーブル）
+                        with tab2:
+                            valid_tickers = df.columns
+
+                            # ラベルは潰れがちなので短縮
+                            labels = [
+                                f"{shorten(name_map.get(t, t))}\n({t})"
+                                for t in valid_tickers
+                            ]
+
+                            left, right = st.columns([1, 1])
+
+                            with left:
+                                fig, ax = plt.subplots()
+                                ax.pie(w, labels=labels, autopct="%1.1f%%", startangle=90)
+                                ax.axis("equal")
+                                st.pyplot(fig)
+
+                            with right:
+                                # ProgressColumnは「数値」を使うので、比率を % の数値にして表示
+                                df_res = pd.DataFrame({
+                                    "コード": valid_tickers,
+                                    "社名": [name_map.get(t, t) for t in valid_tickers],
+                                    "推奨比率(%)": (w * 100.0)
+                                })
+
+                                # ProgressColumn: st.dataframe の column_config で指定 [2](https://docs.streamlit.io/develop/api-reference/data/st.column_config/st.column_config.progresscolumn)[3](https://streamlit.ghost.io/introducing-column-config/)
+                                st.dataframe(
+                                    df_res,
+                                    use_container_width=True,
+                                    hide_index=True,
+                                    column_config={
+                                        "推奨比率(%)": st.column_config.ProgressColumn(
+                                            "推奨比率(%)",
+                                            min_value=0.0,
+                                            max_value=100.0,
+                                            format="%.1f%%",
+                                            help="推奨比率を視覚的に比較できます。"
+                                        )
+                                    }
+                                )
+
+                        # ---- タブ3：詳細（前提・制約・メモ）
+                        with tab3:
+                            st.write("**前提（入力条件）**")
+                            st.write(f"- 期間：{start_date} 〜 {end_date}")
+                            st.write(f"- 銘柄数：{len(ts)}（有効データ：{len(df.columns)}）")
+                            st.write(f"- 制約：各銘柄 {min_weight:.0%} 〜 {max_weight:.0%}")
+                            st.write(f"- 安全資産の利回り：{risk_free_rate:.2%}")
+                            st.write("")
+                            st.write("**計算のメモ**")
+                            st.write("- 対数リターンから年率換算（252営業日換算）で算出しています。")
+                            st.write("- 結果は過去データに基づくもので、将来を保証しません。")
 
                 except Exception as e:
                     st.error(f"エラー: {e}")
