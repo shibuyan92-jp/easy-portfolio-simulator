@@ -256,3 +256,299 @@ if uploaded_a is not None:
 
     # ローカル変数も参照解除（念のため）
     del df_csv
+    del df_import
+    del uploaded_a
+
+    st.success("✅ CSVをAに取り込みました（アップロードファイルは破棄しました）")
+    st.rerun()
+
+# -----------------------------
+# A/Bテーブル
+# -----------------------------
+col_in1, col_in2 = st.columns(2)
+
+with col_in1:
+    st.markdown("### 🅰 A：現状ポートフォリオ（株数）")
+    tmp_a = st.data_editor(
+        st.session_state["holdings_a"],
+        use_container_width=True,
+        hide_index=True,
+        num_rows="dynamic",
+        column_config={
+            "ティッカー": st.column_config.TextColumn("ティッカー（4桁 or 4桁.T）"),
+            "株数": st.column_config.NumberColumn("株数", min_value=0, step=1, format="%.0f"),
+        },
+        key="editor_a",
+    )
+    if st.button("Aに反映"):
+        # 日本株チェック
+        tmp_a2 = tmp_a.copy()
+        tmp_a2["ティッカー"] = tmp_a2["ティッカー"].map(normalize_ticker_jp)
+        if (tmp_a2["ティッカー"] == "INVALID").any():
+            st.error("⚠️ 日本株のみ対応です。ティッカーは4桁（または4桁.T）で入力してください。")
+        else:
+            st.session_state["holdings_a"] = tmp_a2
+            st.rerun()
+
+with col_in2:
+    st.markdown("### 🅱 B：検討ポートフォリオ（株数 or 最適化）")
+    tmp_b = st.data_editor(
+        st.session_state["holdings_b"],
+        use_container_width=True,
+        hide_index=True,
+        num_rows="dynamic",
+        column_config={
+            "ティッカー": st.column_config.TextColumn("ティッカー（4桁 or 4桁.T）"),
+            "株数": st.column_config.NumberColumn("株数", min_value=0, step=1, format="%.0f"),
+        },
+        key="editor_b",
+    )
+    if st.button("Bに反映"):
+        tmp_b2 = tmp_b.copy()
+        tmp_b2["ティッカー"] = tmp_b2["ティッカー"].map(normalize_ticker_jp)
+        if (tmp_b2["ティッカー"] == "INVALID").any():
+            st.error("⚠️ 日本株のみ対応です。ティッカーは4桁（または4桁.T）で入力してください。")
+        else:
+            st.session_state["holdings_b"] = tmp_b2
+            st.rerun()
+
+run = st.button("🔍 A vs B を比較する（株数→時価比率）")
+
+# -----------------------------
+# 実行：株数→時価比率→比較
+# -----------------------------
+if run:
+    if start_date >= end_date:
+        st.error("⚠️ 日付の範囲が不正です（開始日 < 終了日）")
+        st.stop()
+    if min_weight > max_weight:
+        st.error("⚠️ 最小比率が最大比率を上回っています")
+        st.stop()
+
+    df_a = st.session_state["holdings_a"].copy()
+    df_b = st.session_state["holdings_b"].copy()
+
+    df_a["ティッカー"] = df_a["ティッカー"].map(normalize_ticker_jp)
+    df_b["ティッカー"] = df_b["ティッカー"].map(normalize_ticker_jp)
+
+    if (df_a["ティッカー"] == "INVALID").any() or (df_b["ティッカー"] == "INVALID").any():
+        st.error("⚠️ 日本株のみ対応です。ティッカーは「7203」または「7203.T」の形式で入力してください。")
+        st.stop()
+
+    df_a["株数"] = pd.to_numeric(df_a["株数"], errors="coerce").fillna(0)
+    df_b["株数"] = pd.to_numeric(df_b["株数"], errors="coerce").fillna(0)
+
+    df_a = df_a[(df_a["ティッカー"] != "") & (df_a["株数"] > 0)]
+    df_b = df_b[(df_b["ティッカー"] != "") & (df_b["株数"] > 0)]
+
+    if df_a.empty or df_b.empty:
+        st.error("⚠️ A/Bそれぞれ、ティッカーと株数を1行以上入力してください。")
+        st.stop()
+
+    tickers_all = list(dict.fromkeys(df_a["ティッカー"].tolist() + df_b["ティッカー"].tolist()))
+    start_ts = pd.to_datetime(start_date)
+    end_ts = pd.to_datetime(end_date)
+
+    with st.spinner("価格データ取得中..."):
+        prices = get_prices(tickers_all, start_ts, end_ts)
+        name_map = get_company_names(tickers_all)
+
+    if prices is None or prices.empty:
+        st.error("❌ 価格データを取得できませんでした。コードや期間を見直してください。")
+        st.stop()
+
+    if isinstance(prices, pd.Series):
+        prices = prices.to_frame()
+
+    prices = prices.dropna(how="all").select_dtypes(include=[np.number])
+    if prices.empty:
+        st.error("❌ 有効な価格データが不足しています。")
+        st.stop()
+
+    last_px = latest_prices_asof(prices)
+    used_date = prices.index[-1]
+
+    df_a["価格(直近)"] = df_a["ティッカー"].map(lambda t: float(last_px.get(t, np.nan)))
+    df_a = df_a.dropna(subset=["価格(直近)"])
+    df_a["時価"] = df_a["株数"].astype(float) * df_a["価格(直近)"].astype(float)
+
+    df_b["価格(直近)"] = df_b["ティッカー"].map(lambda t: float(last_px.get(t, np.nan)))
+    df_b = df_b.dropna(subset=["価格(直近)"])
+    df_b["時価"] = df_b["株数"].astype(float) * df_b["価格(直近)"].astype(float)
+
+    if df_a.empty or df_b.empty:
+        st.error("⚠️ A/Bの銘柄で価格が取れないものがあります。コードを確認してください。")
+        st.stop()
+
+    log_ret = np.log(prices / prices.shift(1)).dropna()
+
+    tickers_a = df_a["ティッカー"].tolist()
+    tickers_b = df_b["ティッカー"].tolist()
+
+    lr_a = log_ret[tickers_a].dropna(how="any")
+    lr_b = log_ret[tickers_b].dropna(how="any")
+
+    mean_a, cov_a = lr_a.mean().values, lr_a.cov().values
+    mean_b, cov_b = lr_b.mean().values, lr_b.cov().values
+
+    total_a_risky = float(df_a["時価"].sum())
+    total_a = total_a_risky + float(cash_a)
+    if total_a <= 0:
+        st.error("⚠️ Aの総額が0です。")
+        st.stop()
+
+    df_a["比率(%)"] = (df_a["時価"] / total_a) * 100.0
+    w_a_risky = (df_a["時価"].values / total_a).astype(float)
+    cash_w_a = float(cash_a) / total_a
+
+    total_b_risky = float(df_b["時価"].sum())
+    total_b = total_b_risky + float(cash_b)
+    if total_b <= 0:
+        st.error("⚠️ Bの総額が0です。")
+        st.stop()
+
+    if b_mode == "🤖 Sharpe最大化でB配分を自動提案":
+        cash_w_b = float(cash_b) / total_b
+        risky_budget = 1.0 - cash_w_b
+        if risky_budget <= 0:
+            st.error("⚠️ Bが現金100%になっています。現金を減らすか、株数を入力してください。")
+            st.stop()
+
+        res = optimize_sharpe(mean_b, cov_b, min_weight, max_weight, risk_free_rate)
+        if not res.success:
+            st.error("⚠️ Bの最適化に失敗しました。制約（最小/最大比率）を緩めてください。")
+            st.stop()
+
+        w_b_risky = res.x * risky_budget
+        df_b["比率(%)"] = w_b_risky * 100.0
+    else:
+        cash_w_b = float(cash_b) / total_b
+        df_b["比率(%)"] = (df_b["時価"] / total_b) * 100.0
+        w_b_risky = (df_b["時価"].values / total_b).astype(float)
+
+    ret_a, vol_a, sharpe_a = portfolio_metrics_from_weights(mean_a, cov_a, w_a_risky, risk_free_rate, cash_w=cash_w_a)
+    ret_b, vol_b, sharpe_b = portfolio_metrics_from_weights(mean_b, cov_b, w_b_risky, risk_free_rate, cash_w=cash_w_b)
+
+    st.success("✅ 比較結果ができました！")
+
+    tab_cmp, tab_a, tab_b, tab_detail = st.tabs(["📌 比較（A vs B）", "🅰 A（現状）", "🅱 B（検討）", "🧾 前提"])
+
+    with tab_cmp:
+        c1, c2 = st.columns(2)
+        with c1:
+            st.subheader("🅰 A（現状）")
+            st.metric("💰 期待リターン（年率）", f"{ret_a:.2%}", delta=f"{(ret_a - ret_b):+.2%}（A-B）")
+            st.metric("🛡️ リスク（年率）", f"{vol_a:.2%}", delta=f"{(vol_a - vol_b):+.2%}（A-B）")
+            st.metric("📊 Sharpe", f"{sharpe_a:.2f}", delta=f"{(sharpe_a - sharpe_b):+.2f}（A-B）")
+        with c2:
+            st.subheader("🅱 B（検討）")
+            st.metric("💰 期待リターン（年率）", f"{ret_b:.2%}", delta=f"{(ret_b - ret_a):+.2%}（B-A）")
+            st.metric("🛡️ リスク（年率）", f"{vol_b:.2%}", delta=f"{(vol_b - vol_a):+.2%}（B-A）")
+            st.metric("📊 Sharpe", f"{sharpe_b:.2f}", delta=f"{(sharpe_b - sharpe_a):+.2f}（B-A）")
+
+        st.info(f"直近価格は **{used_date.date()} の終値（Adj Close優先）** を使用して時価比率を算出しています。")
+
+        merged = pd.merge(
+            df_a[["ティッカー", "比率(%)"]].rename(columns={"比率(%)": "A比率(%)"}),
+            df_b[["ティッカー", "比率(%)"]].rename(columns={"比率(%)": "B比率(%)"}),
+            on="ティッカー",
+            how="outer",
+        ).fillna(0.0)
+
+        merged["社名"] = merged["ティッカー"].map(lambda t: name_map.get(t, t))
+        merged["差分(B-A)(%)"] = merged["B比率(%)"] - merged["A比率(%)"]
+        merged = merged[["ティッカー", "社名", "A比率(%)", "B比率(%)", "差分(B-A)(%)"]]
+
+        st.markdown("### 配分差分（どこを増やし/減らしたか）")
+        st.dataframe(
+            merged,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "A比率(%)": st.column_config.ProgressColumn("A比率(%)", min_value=0.0, max_value=100.0, format="%.1f%%"),
+                "B比率(%)": st.column_config.ProgressColumn("B比率(%)", min_value=0.0, max_value=100.0, format="%.1f%%"),
+            },
+        )
+
+    with tab_a:
+        st.subheader("🅰 A（現状）")
+        col1, col2 = st.columns([1, 1])
+
+        with col1:
+            labels = [f"{shorten(name_map.get(t, t))}\n({t})" for t in df_a["ティッカー"].tolist()]
+            weights = (df_a["比率(%)"].values / 100.0).astype(float)
+            if cash_w_a > 0:
+                labels = labels + ["Cash（無リスク）"]
+                weights = np.append(weights, cash_w_a)
+
+            fig, ax = plt.subplots()
+            ax.pie(weights, labels=labels, autopct="%1.1f%%", startangle=90)
+            ax.axis("equal")
+            st.pyplot(fig)
+
+        with col2:
+            view = df_a.copy()
+            view["社名"] = view["ティッカー"].map(lambda t: name_map.get(t, t))
+            view = view[["ティッカー", "社名", "株数", "価格(直近)", "時価", "比率(%)"]]
+            st.dataframe(
+                view,
+                use_container_width=True,
+                hide_index=True,
+                column_config={"比率(%)": st.column_config.ProgressColumn("比率(%)", min_value=0.0, max_value=100.0, format="%.1f%%")},
+            )
+            if cash_w_a > 0:
+                st.write(f"現金（無リスク）比率：{cash_w_a*100:.1f}%")
+
+    with tab_b:
+        st.subheader("🅱 B（検討）")
+        st.caption(f"作り方：{b_mode}")
+
+        col1, col2 = st.columns([1, 1])
+
+        with col1:
+            labels = [f"{shorten(name_map.get(t, t))}\n({t})" for t in df_b["ティッカー"].tolist()]
+            weights = (df_b["比率(%)"].values / 100.0).astype(float)
+            if cash_w_b > 0:
+                labels = labels + ["Cash（無リスク）"]
+                weights = np.append(weights, cash_w_b)
+
+            fig, ax = plt.subplots()
+            ax.pie(weights, labels=labels, autopct="%1.1f%%", startangle=90)
+            ax.axis("equal")
+            st.pyplot(fig)
+
+        with col2:
+            view = df_b.copy()
+            view["社名"] = view["ティッカー"].map(lambda t: name_map.get(t, t))
+            view = view[["ティッカー", "社名", "株数", "価格(直近)", "時価", "比率(%)"]]
+            st.dataframe(
+                view,
+                use_container_width=True,
+                hide_index=True,
+                column_config={"比率(%)": st.column_config.ProgressColumn("比率(%)", min_value=0.0, max_value=100.0, format="%.1f%%")},
+            )
+            if cash_w_b > 0:
+                st.write(f"現金（無リスク）比率：{cash_w_b*100:.1f}%")
+
+    with tab_detail:
+        st.write("**前提（比較条件）**")
+        st.write(f"- 期間：{start_date} 〜 {end_date}")
+        st.write(f"- 安全資産の利回り：{risk_free_rate:.2%}")
+        st.write(f"- 価格評価日：{used_date.date()}（期間内の最終営業日）")
+        st.write("")
+        st.write("**B最適化の制約（使用した場合）**")
+        st.write(f"- 各銘柄 最小 {min_weight:.0%} / 最大 {max_weight:.0%}")
+        st.write("")
+        st.write("**メモ**")
+        st.write("- 価格はyfinanceのAdj Close（優先）/ Close を使用します。口座の評価額とはズレることがあります。")
+        st.write("- 結果は過去データに基づく比較で、将来を保証しません。")
+
+# -----------------------------
+# フッター
+# -----------------------------
+st.markdown("---")
+st.caption(
+    "⚠️ 本アプリは投資助言を目的としたものではありません。"
+    "表示される結果は将来の成果を保証するものではなく、"
+    "最終的な投資判断はご自身の責任で行ってください。"
+)
