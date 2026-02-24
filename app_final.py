@@ -31,3 +31,175 @@ st.sidebar.info("💡 ヒント: マウスを項目の上に乗せると、詳�
 
 default_tickers = "8802.T, 7203.T, 6758.T, 8306.T, 9984.T"
 tickers_input = st.sidebar.text_area(
+    "銘柄コード (カンマ区切り)",
+    value=default_tickers,
+    height=80,
+    help="例: 8802.T, 7203.T"
+)
+
+start_date = st.sidebar.date_input("開始日", pd.to_datetime("2020-01-01"))
+end_date = st.sidebar.date_input("終了日", pd.to_datetime("2024-12-31"))
+
+st.sidebar.subheader("自分のルール")
+min_weight = st.sidebar.slider(
+    "最低これくらいは持ちたい (%)",
+    0, 20, 5, 1,
+    help="分散効果を高めるため5%程度がおすすめ"
+) / 100.0
+
+max_weight = st.sidebar.slider(
+    "最大ここまでにしておく (%)",
+    20, 100, 40, 5,
+    help="1銘柄への集中を防ぐ上限"
+) / 100.0
+
+risk_free_rate = st.sidebar.number_input(
+    "安全資産の利回り (%)",
+    value=1.0,
+    step=0.1,
+    help="国債などの金利"
+) / 100.0
+
+# -----------------------------
+# 関数群
+# -----------------------------
+@st.cache_data(show_spinner=False)
+def get_data(tickers, start, end):
+    try:
+        df = yf.download(tickers, start=start, end=end, progress=False)
+        if df is None or df.empty:
+            return None
+
+        # yfinanceは複数銘柄だとMultiIndexになりやすい
+        if isinstance(df.columns, pd.MultiIndex):
+            if "Adj Close" in df.columns.get_level_values(0):
+                return df.xs("Adj Close", axis=1, level=0)
+            if "Close" in df.columns.get_level_values(0):
+                return df.xs("Close", axis=1, level=0)
+
+        # 単一銘柄の場合
+        if "Adj Close" in df.columns:
+            return df["Adj Close"]
+        if "Close" in df.columns:
+            return df["Close"]
+
+        return df.iloc[:, 0] if df.shape[1] > 0 else df
+    except Exception:
+        return None
+
+@st.cache_data(show_spinner=False)
+def get_company_names(tickers_list):
+    names = {}
+    for t in tickers_list:
+        try:
+            ticker_info = yf.Ticker(t)
+            info = ticker_info.info or {}
+            name = info.get("shortName", info.get("longName", t))
+            names[t] = name
+        except Exception:
+            names[t] = t
+    return names
+
+# -----------------------------
+# メイン処理
+# -----------------------------
+if st.button("🚀 AIに計算させる"):
+    raw_ts = tickers_input.split(",")
+    ts = [t.strip() for t in raw_ts if t.strip()]
+
+    if len(ts) < 2:
+        st.error("⚠️ 2銘柄以上入れてください")
+    elif start_date >= end_date:
+        st.error("⚠️ 日付の範囲が不正です（開始日 < 終了日）")
+    elif min_weight > max_weight:
+        st.error("⚠️ 最小比率が最大比率を上回っています")
+    else:
+        with st.spinner("データを分析中..."):
+            df = get_data(ts, start_date, end_date)
+            name_map = get_company_names(ts)
+
+        if df is None or df.empty:
+            st.error("❌ データ取得失敗（銘柄コード・日付範囲を見直してください）")
+        else:
+            df = df.dropna().select_dtypes(include=[np.number])
+            if df.shape[1] < 2:
+                st.error("⚠️ 有効なデータ不足（銘柄や期間を変えてください）")
+            else:
+                try:
+                    log_ret = np.log(df / df.shift(1)).dropna()
+                    mean = log_ret.mean()
+                    cov = log_ret.cov()
+                    n = len(df.columns)
+
+                    def neg_sharpe(w):
+                        r = np.sum(mean * w) * 252
+                        s = np.sqrt(np.dot(w.T, np.dot(cov, w))) * np.sqrt(252)
+                        # 分散がゼロ等で割れない場合の保険
+                        if s == 0:
+                            return 1e9
+                        return -((r - risk_free_rate) / s)
+
+                    cons = ({"type": "eq", "fun": lambda x: np.sum(x) - 1.0},)
+                    bnds = tuple((min_weight, max_weight) for _ in range(n))
+
+                    res = sco.minimize(
+                        neg_sharpe,
+                        x0=np.array([1.0 / n] * n),
+                        method="SLSQP",
+                        bounds=bnds,
+                        constraints=cons
+                    )
+
+                    if res.success:
+                        w = res.x
+                        ret = np.sum(mean * w) * 252
+                        std = np.sqrt(np.dot(w.T, np.dot(cov, w))) * np.sqrt(252)
+                        sharpe = (ret - risk_free_rate) / std if std != 0 else np.nan
+
+                        st.success("✅ 計算完了！")
+                        c1, c2, c3 = st.columns(3)
+                        c1.metric("💰 期待リターン（年率）", f"{ret:.2%}")
+                        c2.metric("🛡️ リスク（年率）", f"{std:.2%}")
+                        c3.metric("📊 投資効率（Sharpe）", f"{sharpe:.2f}" if np.isfinite(sharpe) else "—")
+
+                        # 表現を少し控えめに（社外公開向け）
+                        if np.isfinite(sharpe):
+                            if sharpe >= 1.0:
+                                st.info("参考：過去データ上では効率が高めの構成です。")
+                            elif sharpe >= 0.7:
+                                st.success("参考：過去データ上ではバランスが良い構成です。")
+                            else:
+                                st.warning("参考：過去データ上では効率が低めの可能性があります。")
+
+                        valid_tickers = df.columns
+                        labels = [f"{name_map.get(t, t)}\n({t})" for t in valid_tickers]
+
+                        col1, col2 = st.columns([1, 1])
+                        with col1:
+                            fig, ax = plt.subplots()
+                            ax.pie(w, labels=labels, autopct="%1.1f%%", startangle=90)
+                            ax.axis("equal")
+                            st.pyplot(fig)
+
+                        with col2:
+                            df_res = pd.DataFrame({
+                                "コード": valid_tickers,
+                                "社名": [name_map.get(t, t) for t in valid_tickers],
+                                "推奨比率": [f"{v:.2%}" for v in w]
+                            })
+                            st.dataframe(df_res, use_container_width=True)
+                    else:
+                        st.warning("⚠️ 最適化に失敗しました。条件（最小/最大比率）を緩めてください。")
+
+                except Exception as e:
+                    st.error(f"エラー: {e}")
+
+# -----------------------------
+# 免責（短文：フッター常時表示）
+# -----------------------------
+st.markdown("---")
+st.caption(
+    "⚠️ 本アプリは投資助言を目的としたものではありません。"
+    "表示される結果は将来の成果を保証するものではなく、"
+    "最終的な投資判断はご自身の責任で行ってください。"
+)
