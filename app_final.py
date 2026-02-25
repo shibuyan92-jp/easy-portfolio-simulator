@@ -539,7 +539,7 @@ with colA:
             st.rerun()
 
 with colB:
-    st.markdown("### 🅱 新規PF：株数（①）/ 銘柄リスト（②③）")
+    st.markdown("### 🅱 新規PF：株数①/ 銘柄リスト②③")
     st.caption("②③ではBの株数は使わず、銘柄集合として扱います。")
     edit_b = st.data_editor(
         st.session_state["holdings_b"],
