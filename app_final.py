@@ -442,7 +442,7 @@ rf = st.sidebar.number_input(
 """,
 ) / 100.0
 
-st.sidebar.header("🎯 モード（A=既存 / B=新規）")
+st.sidebar.header("🎯 モード")
 mode = st.sidebar.radio(
     "何をしたい？",
     [
