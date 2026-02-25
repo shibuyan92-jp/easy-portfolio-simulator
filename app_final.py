@@ -517,7 +517,7 @@ if uploaded_a is not None:
 
 colA, colB = st.columns(2)
 with colA:
-    st.markdown("### 🅰 既存ポートフォリオ（A）：株数")
+    st.markdown("### 🅰 既存PF A：株数")
     edit_a = st.data_editor(
         st.session_state["holdings_a"],
         use_container_width=True,
@@ -539,7 +539,7 @@ with colA:
             st.rerun()
 
 with colB:
-    st.markdown("### 🅱 新規ポートフォリオ（B）：株数（①用）/ 銘柄リスト（②③用）")
+    st.markdown("### 🅱 新規PF B：株数（①）/ 銘柄リスト（②③）")
     st.caption("②③ではBの株数は使わず、銘柄集合として扱います。")
     edit_b = st.data_editor(
         st.session_state["holdings_b"],
